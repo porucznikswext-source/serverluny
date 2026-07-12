@@ -1,0 +1,88 @@
+version: 2.1
+
+# ── Reusable anchors ─────────────────────────────────────────────────────────
+defaults: &defaults
+  docker:
+    - image: cimg/python:3.11
+  resource_class: small
+
+# Packages required by serverluny.py (Flask, Selenium, pyperclip).
+# Update the cache key version (v1 → v2) whenever you add/remove dependencies.
+dep-cache-key: &dep-cache-key
+  keys:
+    - pip-v1-{{ checksum ".circleci/requirements.ci.txt" }}
+    - pip-v1-
+
+# ── Jobs ─────────────────────────────────────────────────────────────────────
+jobs:
+  install-deps:
+    <<: *defaults
+    steps:
+      - checkout
+      - restore_cache:
+          <<: *dep-cache-key
+      - run:
+          name: Install dependencies
+          command: pip install --quiet --user -r .circleci/requirements.ci.txt
+      - save_cache:
+          key: pip-v1-{{ checksum ".circleci/requirements.ci.txt" }}
+          paths:
+            - ~/.local/lib/python3.11/site-packages
+            - ~/.local/bin
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - .local/lib/python3.11/site-packages
+            - .local/bin
+
+  lint:
+    <<: *defaults
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Lint (flake8)
+          # E501/W503: long lines & line-break style are intentional in this codebase
+          # E302/E303: blank-line rules relaxed to match existing single-line style
+          command: |
+            flake8 serverluny.py \
+              --max-line-length=120 \
+              --extend-ignore=E302,E303,E501,W503 \
+              --count \
+              --statistics
+
+  syntax-check:
+    <<: *defaults
+    steps:
+      - checkout
+      - run:
+          name: Compile check (py_compile)
+          command: python -m py_compile serverluny.py && echo "Syntax OK"
+      - run:
+          name: AST parse check
+          command: |
+            python - <<'PYEOF'
+            import ast, sys
+            with open("serverluny.py") as f:
+                src = f.read()
+            try:
+                ast.parse(src)
+                print("AST parse OK")
+            except SyntaxError as e:
+                print(f"SyntaxError: {e}")
+                sys.exit(1)
+            PYEOF
+
+# ── Workflow ──────────────────────────────────────────────────────────────────
+workflows:
+  build-and-check:
+    jobs:
+      - install-deps
+      # lint and syntax-check run in parallel once deps are installed
+      - lint:
+          requires:
+            - install-deps
+      - syntax-check:
+          requires:
+            - install-deps
